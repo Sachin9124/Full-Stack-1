@@ -1,0 +1,125 @@
+const express = require('express');
+const app = express();
+const PORT = 3000;
+const NUM_SEATS = 10;
+const LOCK_DURATION = 60000; // 1 minute in milliseconds
+
+app.use(express.json());
+
+const seats = [];
+for (let i = 1; i <= NUM_SEATS; i++) {
+    seats.push({
+        id: i,
+        status: 'available', 
+        lockTime: null,
+        lockedBy: null 
+    });
+}
+
+function clearExpiredLocks() {
+    const now = Date.now();
+    let unlockedCount = 0;
+    
+    seats.forEach(seat => {
+        if (seat.status === 'locked' && seat.lockTime < now - LOCK_DURATION) {
+            seat.status = 'available';
+            seat.lockTime = null;
+            seat.lockedBy = null;
+            unlockedCount++;
+        }
+    });
+
+    if (unlockedCount > 0) {
+        console.log(`[CLEANUP] Unlocked ${unlockedCount} expired seats.`);
+    }
+}
+
+setInterval(clearExpiredLocks, 5000);
+
+app.get('/seats', (req, res) => {
+    const publicSeats = seats.map(seat => ({
+        id: seat.id,
+        status: seat.status === 'locked' ? 'unavailable' : seat.status,
+    }));
+    res.json(publicSeats);
+});
+
+app.post('/lock/:id', (req, res) => {
+    const seatId = parseInt(req.params.id);
+    const { userId } = req.body;
+
+    if (!userId) {
+        return res.status(400).json({ error: 'A userId is required to lock a seat.' });
+    }
+
+    const seat = seats.find(s => s.id === seatId);
+
+    if (!seat) {
+        return res.status(404).json({ error: 'Seat not found.' });
+    }
+
+    if (seat.status === 'booked') {
+        return res.status(409).json({ error: `Seat ${seatId} is already booked.` });
+    }
+
+    const now = Date.now();
+
+    if (seat.status === 'locked') {
+        if (seat.lockedBy === userId) {
+            seat.lockTime = now;
+            return res.status(200).json({ message: `Seat ${seatId} lock refreshed for user ${userId}.`, lockExpires: now + LOCK_DURATION });
+        }
+        
+        if (seat.lockTime >= now - LOCK_DURATION) {
+            return res.status(409).json({ error: `Seat ${seatId} is currently locked by another user.` });
+        }
+        
+        clearExpiredLocks(); 
+        
+    }
+
+    seat.status = 'locked';
+    seat.lockTime = now;
+    seat.lockedBy = userId;
+    res.status(200).json({ message: `Seat ${seatId} successfully locked by user ${userId}.`, lockExpires: now + LOCK_DURATION });
+});
+
+app.post('/confirm/:id', (req, res) => {
+    const seatId = parseInt(req.params.id);
+    const { userId } = req.body;
+
+    if (!userId) {
+        return res.status(400).json({ error: 'A userId is required to confirm a booking.' });
+    }
+
+    const seat = seats.find(s => s.id === seatId);
+
+    if (!seat || seat.status === 'booked') {
+        return res.status(409).json({ error: `Seat ${seatId} cannot be booked (not found or already booked).` });
+    }
+
+    if (seat.status === 'locked' && seat.lockedBy === userId) {
+        if (seat.lockTime < Date.now() - LOCK_DURATION) {
+            clearExpiredLocks();
+            return res.status(409).json({ error: `Lock for Seat ${seatId} expired. Please lock again.` });
+        }
+        
+        seat.status = 'booked';
+        seat.lockTime = null;
+        seat.lockedBy = null;
+        return res.status(200).json({ message: `Seat ${seatId} successfully booked by user ${userId}.` });
+    }
+
+    return res.status(401).json({ error: `Seat ${seatId} is not currently locked by user ${userId}, or the lock has expired.` });
+});
+
+app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Seat locking duration: ${LOCK_DURATION / 1000} seconds.`);
+    console.log('API Endpoints:');
+    console.log('  GET    /seats');
+    console.log('  POST   /lock/:id  (Body: { "userId": "userA" })');
+    console.log('  POST   /confirm/:id (Body: { "userId": "userA" })');
+    console.log('----------------------------------------------------');
+    console.log('To simulate concurrency, run two different POST requests to /lock/:id with different userIds immediately after each other.');
+});
